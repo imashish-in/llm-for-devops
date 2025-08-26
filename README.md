@@ -1,19 +1,22 @@
 # LLM Flask Application
 
-A Flask-based web application for LLM (Large Language Model) inference using Microsoft's DialoGPT-medium model, designed to run in Kubernetes with Docker containerization.
+A Flask-based web application for LLM (Large Language Model) inference using Microsoft's DialoGPT-medium model, designed to run in Kubernetes with Docker containerization. Features advanced caching and optimization for production-ready performance.
 
 ## 🚀 Features
 
 - **Flask Web Server**: RESTful API endpoints for LLM interactions
 - **DialoGPT-medium Model**: Powered by Microsoft's DialoGPT-medium model via Hugging Face Transformers
+- **Advanced Caching**: Response caching with TTL and LRU eviction
+- **Model Optimization**: Half-precision, memory optimization, and performance tuning
 - **Docker Containerization**: Easy deployment and scaling
-- **Kubernetes Ready**: Complete deployment configuration
+- **Kubernetes Ready**: Complete deployment configuration with persistent storage
 - **Health Monitoring**: Built-in health checks and readiness probes
 - **Error Handling**: Comprehensive error handling and logging
+- **Multi-Platform Support**: Build for any OS and architecture
 
 ## 📋 Prerequisites
 
-- Docker Desktop
+- Docker Desktop or Docker Engine
 - Kubernetes cluster (Docker Desktop Kubernetes, Minikube, or cloud provider)
 - kubectl CLI tool
 - Python 3.10+ (for local development)
@@ -24,9 +27,83 @@ A Flask-based web application for LLM (Large Language Model) inference using Mic
 LLM for DevOps/
 ├── app.py                          # Main Flask application with DialoGPT-medium
 ├── Dockerfile                      # Docker container configuration
-├── requirements.txt                # Python dependencies (transformers, torch)
+├── requirements.txt                # Python dependencies (transformers, torch, accelerate)
 ├── llm-flask-deployment.yaml      # Kubernetes deployment configuration
+├── CACHING_AND_OPTIMIZATION.md    # Detailed caching and optimization guide
 └── README.md                       # This file
+```
+
+## 🐳 Docker Build Instructions
+
+### **Multi-Platform Build Support**
+
+The application supports building for multiple operating systems and architectures:
+
+#### **1. Apple Silicon (M1/M2) Macs**
+```bash
+# Build for ARM64 (Apple Silicon)
+docker build --platform linux/arm64 -t ashishsoldy/llm-flask:latest .
+
+# Run locally
+docker run -p 8080:8080 ashishsoldy/llm-flask:latest
+```
+
+#### **2. Intel/AMD64 Systems (Windows, Linux, Intel Macs)**
+```bash
+# Build for AMD64 (Intel/AMD)
+docker build --platform linux/amd64 -t ashishsoldy/llm-flask:latest .
+
+# Run locally
+docker run -p 8080:8080 ashishsoldy/llm-flask:latest
+```
+
+#### **3. Multi-Platform Build (Recommended)**
+```bash
+# Build for both ARM64 and AMD64 simultaneously
+docker buildx create --use
+docker buildx build --platform linux/amd64,linux/arm64 -t ashishsoldy/llm-flask:latest .
+
+# Push multi-platform image
+docker buildx build --platform linux/amd64,linux/arm64 -t ashishsoldy/llm-flask:latest --push .
+```
+
+#### **4. Windows-Specific Build**
+```bash
+# For Windows with WSL2
+docker build --platform linux/amd64 -t ashishsoldy/llm-flask:latest .
+
+# For Windows with Docker Desktop
+docker build -t ashishsoldy/llm-flask:latest .
+```
+
+#### **5. Linux-Specific Build**
+```bash
+# For Linux systems
+docker build --platform linux/amd64 -t ashishsoldy/llm-flask:latest .
+
+# For ARM64 Linux (Raspberry Pi, etc.)
+docker build --platform linux/arm64 -t ashishsoldy/llm-flask:latest .
+```
+
+### **Build Options and Tags**
+
+#### **Version Tagging**
+```bash
+# Build with version tag
+docker build --platform linux/arm64 -t ashishsoldy/llm-flask:v1.0.0 .
+
+# Build with multiple tags
+docker build --platform linux/arm64 -t ashishsoldy/llm-flask:latest -t ashishsoldy/llm-flask:v1.0.0 .
+```
+
+#### **Build Arguments (Advanced)**
+```bash
+# Build with custom arguments
+docker build \
+  --platform linux/arm64 \
+  --build-arg PYTHON_VERSION=3.10 \
+  --build-arg MODEL_NAME=microsoft/DialoGPT-medium \
+  -t ashishsoldy/llm-flask:latest .
 ```
 
 ## 🚀 Quick Start
@@ -45,14 +122,24 @@ The application will be available at `http://localhost:8080`
 
 ### 2. Docker Deployment
 
+#### **Step-by-Step Docker Build**
+
 ```bash
-# Build the Docker image
+# 1. Clone the repository
+git clone https://github.com/imashish-in/llm-for-devops.git
+cd llm-for-devops
+
+# 2. Build the Docker image (choose your platform)
+# For Apple Silicon:
 docker build --platform linux/arm64 -t ashishsoldy/llm-flask:latest .
 
-# Run the container locally
+# For Intel/AMD64:
+docker build --platform linux/amd64 -t ashishsoldy/llm-flask:latest .
+
+# 3. Run the container locally
 docker run -p 8080:8080 ashishsoldy/llm-flask:latest
 
-# Push to Docker Hub (optional)
+# 4. Push to Docker Hub (optional)
 docker push ashishsoldy/llm-flask:latest
 ```
 
@@ -86,7 +173,14 @@ GET /health
 ```json
 {
   "status": "healthy",
-  "message": "DialoGPT-medium model is loaded and ready"
+  "message": "DialoGPT-medium model is loaded and ready",
+  "cache_info": {
+    "cache_size": 45,
+    "cache_hits": 123,
+    "cache_misses": 67,
+    "hit_rate": 0.647
+  },
+  "device": "cpu"
 }
 ```
 
@@ -96,15 +190,26 @@ POST /generate
 Content-Type: application/json
 
 {
-  "prompt": "Your input text here"
+  "prompt": "Your input text here",
+  "temperature": 0.8,
+  "max_tokens": 256
 }
 ```
 
 **Response:**
 ```json
 {
-  "response": "Generated text from DialoGPT-medium model"
+  "response": "Generated text from DialoGPT-medium model",
+  "cached": false,
+  "generation_time": 2.34
 }
+```
+
+### Cache Management
+```http
+GET /cache/stats
+POST /cache/clear
+GET /model/info
 ```
 
 ### Example LLM Interaction
@@ -120,7 +225,9 @@ curl -X POST http://localhost:8080/generate \
 **Expected Response:**
 ```json
 {
-  "response": "Machine learning is the process of learning a new thing. You will learn what you have learned."
+  "response": "Machine learning is the process of learning a new thing. You will learn what you have learned.",
+  "cached": false,
+  "generation_time": 1.23
 }
 ```
 
@@ -131,9 +238,13 @@ curl -X POST http://localhost:8080/generate \
 The application uses:
 - **Model**: `microsoft/DialoGPT-medium` from Hugging Face
 - **Library**: Transformers with PyTorch backend
+- **Optimizations**: 
+  - Half precision (float16) for memory efficiency
+  - Model caching with persistent storage
+  - Response caching with TTL
 - **Generation Parameters**: 
-  - Temperature: 0.8
-  - Max new tokens: 256
+  - Temperature: 0.8 (configurable)
+  - Max new tokens: 256 (configurable)
   - Top-p: 0.9 (nucleus sampling)
   - Top-k: 50
   - Repetition penalty: 1.1
@@ -142,6 +253,7 @@ The application uses:
 
 The deployment includes:
 - **Resource Management**: 4Gi memory request, 8Gi limit
+- **Persistent Storage**: 10Gi PVC for model cache
 - **Health Checks**: Liveness and readiness probes
 - **Service Discovery**: ClusterIP service for internal communication
 - **Scaling**: Horizontal pod autoscaling ready
@@ -177,16 +289,43 @@ kubectl logs -f deployment/llm-flask
 kubectl exec -it <pod-name> -- curl -I https://huggingface.co
 ```
 
+#### 4. Platform-Specific Issues
+
+**Apple Silicon (M1/M2) Macs:**
+```bash
+# Ensure you're building for ARM64
+docker build --platform linux/arm64 -t ashishsoldy/llm-flask:latest .
+
+# Check if Docker Desktop supports ARM64
+docker version
+```
+
+**Intel/AMD64 Systems:**
+```bash
+# Build for AMD64
+docker build --platform linux/amd64 -t ashishsoldy/llm-flask:latest .
+
+# For Windows, ensure WSL2 is enabled
+wsl --list --verbose
+```
+
 ### Platform-Specific Notes
 
 #### Apple Silicon (M1/M2) Macs
 - Build images with `--platform linux/arm64` flag
 - Use ARM64-compatible base images
 - Ensure Kubernetes cluster supports ARM64
+- Docker Desktop should be configured for ARM64
 
 #### Intel/AMD64 Systems
 - Build images with `--platform linux/amd64` flag
 - Use AMD64-compatible base images
+- Compatible with most cloud providers
+
+#### Windows Systems
+- Use WSL2 for best performance
+- Docker Desktop should be configured for WSL2
+- Build with `--platform linux/amd64` for compatibility
 
 ## 🔄 Development Workflow
 
@@ -209,7 +348,7 @@ curl -X POST http://localhost:8080/generate \
 
 ### 3. Build and Deploy
 ```bash
-# Build new image
+# Build new image (choose your platform)
 docker build --platform linux/arm64 -t ashishsoldy/llm-flask:latest .
 
 # Push to registry
@@ -228,13 +367,14 @@ kubectl logs -f deployment/llm-flask
 ## 🔮 Future Enhancements
 
 ### Planned Features
-- [ ] Model caching and optimization
+- [ ] Model caching and optimization ✅ (Implemented)
 - [ ] Authentication and rate limiting
 - [ ] Metrics and monitoring
 - [ ] Horizontal pod autoscaling
 - [ ] Ingress configuration for external access
 - [ ] Support for additional models
 - [ ] Batch processing capabilities
+- [ ] Redis integration for distributed caching
 
 ### Model Options
 The application can be easily modified to use other models:
@@ -247,14 +387,18 @@ The application can be easily modified to use other models:
 
 ### Current Capabilities
 - **Real LLM Responses**: Uses actual DialoGPT-medium model for text generation
+- **Advanced Caching**: Response caching with TTL and LRU eviction
+- **Model Optimization**: Half-precision and memory optimization
 - **Docker Compatible**: Fully containerized and Kubernetes-ready
 - **Production Ready**: Stable deployment with health checks
 - **Memory Efficient**: Medium-sized model suitable for containerized environments
 - **Open Access**: No authentication required for model access
+- **Multi-Platform**: Supports all major operating systems and architectures
 
 ### Performance Considerations
 - **Model Size**: DialoGPT-medium requires ~1.5GB RAM
 - **Response Time**: First response may take 3-5 seconds for model loading
+- **Cached Responses**: < 100ms for repeated queries
 - **Concurrent Requests**: Limited by available memory and CPU
 - **Scaling**: Horizontal scaling supported via Kubernetes
 
@@ -305,4 +449,15 @@ curl -X POST http://localhost:8080/generate \
 curl -X POST http://localhost:8080/generate \
   -H "Content-Type: application/json" \
   -d '{"prompt": "Hello, how are you?"}'
+
+# Test cache statistics
+curl http://localhost:8080/cache/stats
+
+# Test model information
+curl http://localhost:8080/model/info
 ```
+
+## 📚 Additional Documentation
+
+- **[Caching and Optimization Guide](CACHING_AND_OPTIMIZATION.md)**: Detailed guide on caching features and performance optimization
+- **[Docker Multi-Platform Build Guide](DOCKER_BUILD_GUIDE.md)**: Comprehensive guide for building on different platforms

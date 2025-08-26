@@ -1,3 +1,14 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: llm-model-cache-pvc
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -24,6 +35,16 @@ spec:
           limits:
             memory: "8Gi"
             cpu: "2000m"
+        volumeMounts:
+        - name: model-cache
+          mountPath: /app/model_cache
+        env:
+        - name: TRANSFORMERS_CACHE
+          value: "/app/model_cache"
+        - name: HF_HOME
+          value: "/app/model_cache"
+        - name: TORCH_HOME
+          value: "/app/model_cache"
         livenessProbe:
           httpGet:
             path: /health
@@ -38,6 +59,10 @@ spec:
           initialDelaySeconds: 90
           periodSeconds: 10
           timeoutSeconds: 5
+      volumes:
+      - name: model-cache
+        persistentVolumeClaim:
+          claimName: llm-model-cache-pvc
 ---
 apiVersion: v1
 kind: Service
