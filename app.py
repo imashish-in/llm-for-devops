@@ -7,6 +7,15 @@ from functools import lru_cache
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
 import gc
+from collections import defaultdict
+from flask import Flask, request, jsonify
+from transformers import AutoTokenizer, AutoModelForCausalLM
+import torch
+
+# Authentication and Rate Limiting Setup
+from functools import wraps
+import jwt
+from datetime import datetime, timedelta
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -24,6 +33,66 @@ cache_stats = {"hits": 0, "misses": 0}
 CACHE_SIZE = 1000  # Maximum number of cached responses
 CACHE_TTL = 3600   # Cache TTL in seconds (1 hour)
 MODEL_CACHE_DIR = "/app/model_cache"  # Persistent model cache directory
+
+# Authentication and Rate Limiting Setup
+SECRET_KEY = os.environ.get('SECRET_KEY', 'your-secret-key-change-in-production')
+VALID_API_KEYS = {
+    "user1": os.environ.get('API_KEY_USER1', 'sk-1234567890abcdef'),
+    "user2": os.environ.get('API_KEY_USER2', 'sk-fedcba0987654321')
+}
+
+# Rate limiting storage
+request_counts = defaultdict(list)
+
+# Authentication decorator
+def require_api_key(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        api_key = request.headers.get('X-API-Key')
+        if not api_key or api_key not in VALID_API_KEYS.values():
+            return jsonify({"error": "Invalid or missing API key"}), 401
+        return f(*args, **kwargs)
+    return decorated_function
+
+# Rate limiting decorator
+def rate_limit(max_requests=10, window_seconds=60):
+    def decorator(f):
+        @wraps(f)
+        def decorated_function(*args, **kwargs):
+            # Get user identifier from API key
+            api_key = request.headers.get('X-API-Key')
+            user_id = None
+            for user, key in VALID_API_KEYS.items():
+                if key == api_key:
+                    user_id = user
+                    break
+            
+            if not user_id:
+                return jsonify({"error": "Invalid API key"}), 401
+            
+            current_time = time.time()
+            
+            # Clean old requests outside the window
+            request_counts[user_id] = [
+                req_time for req_time in request_counts[user_id]
+                if current_time - req_time < window_seconds
+            ]
+            
+            # Check if user has exceeded limit
+            if len(request_counts[user_id]) >= max_requests:
+                return jsonify({
+                    "error": "Rate limit exceeded",
+                    "retry_after": window_seconds,
+                    "limit": max_requests,
+                    "window": window_seconds
+                }), 429
+            
+            # Add current request
+            request_counts[user_id].append(current_time)
+            
+            return f(*args, **kwargs)
+        return decorated_function
+    return decorator
 
 def setup_model_cache():
     """Setup model cache directory"""
@@ -140,6 +209,8 @@ def health():
         return jsonify({"status": "unhealthy", "error": "No model loaded"}), 500
 
 @app.route("/generate", methods=["POST"])
+@require_api_key
+@rate_limit(max_requests=5, window_seconds=60)  # 5 requests per minute per user
 def generate():
     try:
         prompt = request.json.get("prompt", "")
@@ -254,6 +325,42 @@ def clear_cache():
     cache_stats = {"hits": 0, "misses": 0}
     optimize_memory()
     return jsonify({"message": "Cache cleared successfully"})
+
+@app.route("/rate-limit/status")
+@require_api_key
+def rate_limit_status():
+    """Get current rate limit status for the authenticated user"""
+    api_key = request.headers.get('X-API-Key')
+    user_id = None
+    for user, key in VALID_API_KEYS.items():
+        if key == api_key:
+            user_id = user
+            break
+    
+    if not user_id:
+        return jsonify({"error": "Invalid API key"}), 401
+    
+    current_time = time.time()
+    window_seconds = 60
+    max_requests = 5
+    
+    # Clean old requests
+    request_counts[user_id] = [
+        req_time for req_time in request_counts[user_id]
+        if current_time - req_time < window_seconds
+    ]
+    
+    current_requests = len(request_counts[user_id])
+    remaining_requests = max(0, max_requests - current_requests)
+    
+    return jsonify({
+        "user_id": user_id,
+        "current_requests": current_requests,
+        "remaining_requests": remaining_requests,
+        "limit": max_requests,
+        "window_seconds": window_seconds,
+        "reset_time": current_time + window_seconds if current_requests > 0 else None
+    })
 
 @app.route("/model/info", methods=["GET"])
 def model_info():

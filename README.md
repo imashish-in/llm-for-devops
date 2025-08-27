@@ -8,6 +8,8 @@ A Flask-based web application for LLM (Large Language Model) inference using Mic
 - **DialoGPT-medium Model**: Powered by Microsoft's DialoGPT-medium model via Hugging Face Transformers
 - **Advanced Caching**: Response caching with TTL and LRU eviction
 - **Model Optimization**: Half-precision, memory optimization, and performance tuning
+- **Authentication**: API key-based authentication for secure access
+- **Rate Limiting**: Configurable rate limiting per user (5 requests/minute)
 - **Docker Containerization**: Easy deployment and scaling
 - **Kubernetes Ready**: Complete deployment configuration with persistent storage
 - **Health Monitoring**: Built-in health checks and readiness probes
@@ -188,6 +190,7 @@ GET /health
 ```http
 POST /generate
 Content-Type: application/json
+X-API-Key: sk-1234567890abcdef
 
 {
   "prompt": "Your input text here",
@@ -205,6 +208,28 @@ Content-Type: application/json
 }
 ```
 
+**Authentication Required**: ✅ Yes (API Key)
+
+### Rate Limit Status
+```http
+GET /rate-limit/status
+X-API-Key: sk-1234567890abcdef
+```
+
+**Response:**
+```json
+{
+  "user_id": "user1",
+  "current_requests": 2,
+  "remaining_requests": 3,
+  "limit": 5,
+  "window_seconds": 60,
+  "reset_time": 1640995260
+}
+```
+
+**Authentication Required**: ✅ Yes (API Key)
+
 ### Cache Management
 ```http
 GET /cache/stats
@@ -212,11 +237,14 @@ POST /cache/clear
 GET /model/info
 ```
 
+**Authentication Required**: ❌ No (Public endpoints)
+
 ### Example LLM Interaction
 ```bash
 # Test the LLM endpoint with a sample prompt
 curl -X POST http://localhost:8080/generate \
   -H "Content-Type: application/json" \
+  -H "X-API-Key: sk-1234567890abcdef" \
   -d '{
     "prompt": "Explain what is machine learning in simple terms"
   }'
@@ -368,7 +396,7 @@ kubectl logs -f deployment/llm-flask
 
 ### Planned Features
 - [ ] Model caching and optimization ✅ (Implemented)
-- [ ] Authentication and rate limiting
+- [ ] Authentication and rate limiting ✅ (Implemented)
 - [ ] Metrics and monitoring
 - [ ] Horizontal pod autoscaling
 - [ ] Ingress configuration for external access
@@ -429,35 +457,59 @@ For issues and questions:
 3. Open an issue in the repository
 4. Check the deployment status: `kubectl describe deployment llm-flask`
 
+## 🔐 Authentication and Rate Limiting
+
+### API Key Authentication
+
+The application requires API key authentication for secure access. Include your API key in the `X-API-Key` header:
+
+```bash
+curl -X POST http://localhost:8080/generate \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: sk-1234567890abcdef" \
+  -d '{"prompt": "Hello, how are you?"}'
+```
+
+### Rate Limiting
+
+- **Limit**: 5 requests per minute per user
+- **Window**: 60 seconds
+- **Status**: Check your rate limit status with `/rate-limit/status`
+
+### Default API Keys
+
+For testing purposes, the following API keys are available:
+
+- **User 1**: `sk-1234567890abcdef`
+- **User 2**: `sk-fedcba0987654321`
+
+**⚠️ Security Note**: Change these keys in production using environment variables.
+
 ## 🎯 Quick Test Commands
 
 ```bash
-# Test health endpoint
+# Test health endpoint (no authentication required)
 curl http://localhost:8080/health
 
-# Test text generation
+# Test text generation with authentication
 curl -X POST http://localhost:8080/generate \
   -H "Content-Type: application/json" \
+  -H "X-API-Key: sk-1234567890abcdef" \
   -d '{"prompt": "Write a short poem about technology"}'
 
-# Test with different prompt
-curl -X POST http://localhost:8080/generate \
-  -H "Content-Type: application/json" \
-  -d '{"prompt": "Explain quantum computing in one sentence"}'
+# Test rate limit status
+curl -H "X-API-Key: sk-1234567890abcdef" \
+  http://localhost:8080/rate-limit/status
 
-# Test conversational response
-curl -X POST http://localhost:8080/generate \
-  -H "Content-Type: application/json" \
-  -d '{"prompt": "Hello, how are you?"}'
-
-# Test cache statistics
+# Test cache statistics (no authentication required)
 curl http://localhost:8080/cache/stats
 
-# Test model information
+# Test model information (no authentication required)
 curl http://localhost:8080/model/info
 ```
 
 ## 📚 Additional Documentation
 
 - **[Caching and Optimization Guide](CACHING_AND_OPTIMIZATION.md)**: Detailed guide on caching features and performance optimization
+- **[Authentication and Rate Limiting Guide](AUTHENTICATION_AND_RATE_LIMITING.md)**: Comprehensive guide on security features and API access control
 - **[Docker Multi-Platform Build Guide](DOCKER_BUILD_GUIDE.md)**: Comprehensive guide for building on different platforms
