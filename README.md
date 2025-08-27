@@ -159,9 +159,16 @@ kubectl port-forward service/llm-flask-service 8080:8080
 
 # Test the deployed application
 curl http://localhost:8080/health
+
+# Test with authentication
 curl -X POST http://localhost:8080/generate \
   -H "Content-Type: application/json" \
+  -H "X-API-Key: sk-1234567890abcdef" \
   -d '{"prompt": "What is artificial intelligence?"}'
+
+# Check rate limit status
+curl -H "X-API-Key: sk-1234567890abcdef" \
+  http://localhost:8080/rate-limit/status
 ```
 
 ## 📡 API Endpoints
@@ -204,7 +211,8 @@ X-API-Key: sk-1234567890abcdef
 {
   "response": "Generated text from DialoGPT-medium model",
   "cached": false,
-  "generation_time": 2.34
+  "generation_time": 2.34,
+  "tokens_generated": 15
 }
 ```
 
@@ -239,6 +247,8 @@ GET /model/info
 
 **Authentication Required**: ❌ No (Public endpoints)
 
+
+
 ### Example LLM Interaction
 ```bash
 # Test the LLM endpoint with a sample prompt
@@ -255,7 +265,8 @@ curl -X POST http://localhost:8080/generate \
 {
   "response": "Machine learning is the process of learning a new thing. You will learn what you have learned.",
   "cached": false,
-  "generation_time": 1.23
+  "generation_time": 1.23,
+  "tokens_generated": 12
 }
 ```
 
@@ -392,12 +403,121 @@ kubectl get pods -l app=llm-flask
 kubectl logs -f deployment/llm-flask
 ```
 
+## 🔐 Authentication and Rate Limiting
+
+### API Key Authentication
+
+The application uses API key-based authentication for secure access to the LLM endpoints.
+
+#### **Valid API Keys**
+- **User 1**: `sk-1234567890abcdef`
+- **User 2**: `sk-fedcba0987654321`
+
+#### **Usage**
+```bash
+# Include API key in request headers
+curl -X POST http://localhost:8080/generate \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: sk-1234567890abcdef" \
+  -d '{"prompt": "Hello, how are you?"}'
+```
+
+#### **Error Response**
+```json
+{
+  "error": "Invalid or missing API key"
+}
+```
+
+### Rate Limiting
+
+The application implements in-memory rate limiting to prevent abuse:
+
+#### **Rate Limit Configuration**
+- **Requests per user**: 5 requests per minute
+- **Time window**: 60 seconds
+- **Storage**: In-memory (resets on application restart)
+
+#### **Check Rate Limit Status**
+```bash
+curl -H "X-API-Key: sk-1234567890abcdef" \
+  http://localhost:8080/rate-limit/status
+```
+
+**Response:**
+```json
+{
+  "user_id": "user1",
+  "current_requests": 2,
+  "remaining_requests": 3,
+  "limit": 5,
+  "window_seconds": 60,
+  "reset_time": 1640995260
+}
+```
+
+#### **Rate Limit Exceeded Response**
+```json
+{
+  "error": "Rate limit exceeded",
+  "retry_after": 60,
+  "limit": 5,
+  "window": 60
+}
+```
+
+### Configuration
+
+#### **Environment Variables**
+```bash
+# Authentication
+SECRET_KEY=your-super-secret-key-change-this-in-production
+API_KEY_USER1=sk-1234567890abcdef
+API_KEY_USER2=sk-fedcba0987654321
+
+# Rate Limiting (via ConfigMap)
+RATE_LIMIT_REQUESTS=5
+RATE_LIMIT_WINDOW=60
+```
+
+#### **Kubernetes Secrets**
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: llm-auth-secrets
+type: Opaque
+data:
+  secret-key: <base64-encoded-secret-key>
+  api-key-user1: <base64-encoded-api-key-1>
+  api-key-user2: <base64-encoded-api-key-2>
+```
+
+#### **Kubernetes ConfigMap**
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: llm-config
+data:
+  rate-limit-requests: "5"
+  rate-limit-window: "60"
+```
+
+### Security Best Practices
+
+1. **Change Default Keys**: Update the default API keys in production
+2. **Use Strong Secrets**: Generate strong secret keys for JWT operations
+3. **Environment Isolation**: Use different keys for different environments
+4. **Regular Rotation**: Rotate API keys periodically
+5. **Monitor Usage**: Track API key usage and rate limit violations
+6. **HTTPS Only**: Use HTTPS in production environments
+
 ## 🔮 Future Enhancements
 
 ### Planned Features
 - [ ] Model caching and optimization ✅ (Implemented)
 - [ ] Authentication and rate limiting ✅ (Implemented)
-- [ ] Metrics and monitoring
 - [ ] Horizontal pod autoscaling
 - [ ] Ingress configuration for external access
 - [ ] Support for additional models
@@ -417,10 +537,11 @@ The application can be easily modified to use other models:
 - **Real LLM Responses**: Uses actual DialoGPT-medium model for text generation
 - **Advanced Caching**: Response caching with TTL and LRU eviction
 - **Model Optimization**: Half-precision and memory optimization
+- **Authentication**: API key-based authentication for secure access
+- **Rate Limiting**: In-memory rate limiting (5 requests/minute per user)
 - **Docker Compatible**: Fully containerized and Kubernetes-ready
 - **Production Ready**: Stable deployment with health checks
 - **Memory Efficient**: Medium-sized model suitable for containerized environments
-- **Open Access**: No authentication required for model access
 - **Multi-Platform**: Supports all major operating systems and architectures
 
 ### Performance Considerations
@@ -431,11 +552,13 @@ The application can be easily modified to use other models:
 - **Scaling**: Horizontal scaling supported via Kubernetes
 
 ### Security Considerations
-- Add authentication for production use
-- Implement rate limiting
-- Use secrets for sensitive configuration
-- Enable TLS/SSL for external access
-- Regular security updates
+- ✅ **Authentication**: API key-based authentication implemented
+- ✅ **Rate Limiting**: In-memory rate limiting implemented
+- ✅ **Secrets Management**: Kubernetes secrets for sensitive configuration
+- **TLS/SSL**: Enable TLS/SSL for external access in production
+- **Regular Updates**: Keep dependencies and base images updated
+- **Key Rotation**: Rotate API keys periodically
+- **Access Logging**: Monitor API usage and authentication attempts
 
 ## 🤝 Contributing
 
@@ -506,10 +629,14 @@ curl http://localhost:8080/cache/stats
 
 # Test model information (no authentication required)
 curl http://localhost:8080/model/info
-```
+
+# Test metrics and monitoring (no authentication required)
+curl http://localhost:8080/metrics
+curl http://localhost:8080/dashboard
 
 ## 📚 Additional Documentation
 
 - **[Caching and Optimization Guide](CACHING_AND_OPTIMIZATION.md)**: Detailed guide on caching features and performance optimization
 - **[Authentication and Rate Limiting Guide](AUTHENTICATION_AND_RATE_LIMITING.md)**: Comprehensive guide on security features and API access control
+- **[Metrics and Monitoring Guide](METRICS_AND_MONITORING.md)**: Comprehensive guide on monitoring, metrics, and performance tracking
 - **[Docker Multi-Platform Build Guide](DOCKER_BUILD_GUIDE.md)**: Comprehensive guide for building on different platforms

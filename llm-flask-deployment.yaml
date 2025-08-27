@@ -1,3 +1,45 @@
+# LLM Flask Kubernetes Deployment with Authentication and Rate Limiting
+# 
+# This deployment includes:
+# - ConfigMap for rate limiting configuration
+# - Secrets for API keys and authentication
+# - Persistent volume for model caching
+# - Network policy for security
+# - Security contexts for enhanced security
+# - Health checks and resource limits
+# - Service for internal communication
+#
+# Usage:
+#   kubectl apply -f llm-flask-deployment.yaml
+#
+# To update secrets:
+#   kubectl create secret generic llm-auth-secrets \
+#     --from-literal=secret-key="your-secret-key" \
+#     --from-literal=api-key-user1="sk-1234567890abcdef" \
+#     --from-literal=api-key-user2="sk-fedcba0987654321" \
+#     --dry-run=client -o yaml | kubectl apply -f -
+#
+# To update config:
+#   kubectl patch configmap llm-config --patch '{"data":{"rate-limit-requests":"10"}}'
+#
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: llm-config
+data:
+  rate-limit-requests: "5"
+  rate-limit-window: "60"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: llm-auth-secrets
+type: Opaque
+data:
+  secret-key: eW91ci1zdXBlci1zZWNyZXQta2V5LWNoYW5nZS10aGlzLWluLXByb2R1Y3Rpb24=
+  api-key-user1: c2stMTIzNDU2Nzg5MGFiY2RlZg==
+  api-key-user2: c2stZmVkY2JhMDk4NzY1NDMyMQ==
+---
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -13,6 +55,13 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: llm-flask
+  labels:
+    app: llm-flask
+    version: v1.0.0
+    component: llm-api
+  annotations:
+    description: "LLM Flask API with authentication and rate limiting"
+    maintainer: "DevOps Team"
 spec:
   replicas: 1
   selector:
@@ -23,9 +72,13 @@ spec:
       labels:
         app: llm-flask
     spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
       containers:
       - name: llm-flask
-        image: ashishsoldy/llm-flask:latest
+        image: ashishsoldy/llm-flask:auth-rate-limit
         ports:
         - containerPort: 8080
         resources:
@@ -35,6 +88,13 @@ spec:
           limits:
             memory: "8Gi"
             cpu: "2000m"
+        # Security context for the container
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: false
+          capabilities:
+            drop:
+            - ALL
         volumeMounts:
         - name: model-cache
           mountPath: /app/model_cache
@@ -45,6 +105,33 @@ spec:
           value: "/app/model_cache"
         - name: TORCH_HOME
           value: "/app/model_cache"
+        # Authentication and Rate Limiting Configuration
+        - name: SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: llm-auth-secrets
+              key: secret-key
+        - name: API_KEY_USER1
+          valueFrom:
+            secretKeyRef:
+              name: llm-auth-secrets
+              key: api-key-user1
+        - name: API_KEY_USER2
+          valueFrom:
+            secretKeyRef:
+              name: llm-auth-secrets
+              key: api-key-user2
+        # Rate Limiting Configuration from ConfigMap
+        - name: RATE_LIMIT_REQUESTS
+          valueFrom:
+            configMapKeyRef:
+              name: llm-config
+              key: rate-limit-requests
+        - name: RATE_LIMIT_WINDOW
+          valueFrom:
+            configMapKeyRef:
+              name: llm-config
+              key: rate-limit-window
         livenessProbe:
           httpGet:
             path: /health
@@ -63,6 +150,34 @@ spec:
       - name: model-cache
         persistentVolumeClaim:
           claimName: llm-model-cache-pvc
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: llm-flask-network-policy
+spec:
+  podSelector:
+    matchLabels:
+      app: llm-flask
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: default
+    ports:
+    - protocol: TCP
+      port: 8080
+  egress:
+  - to:
+    - namespaceSelector: {}
+    ports:
+    - protocol: TCP
+      port: 443
+    - protocol: TCP
+      port: 80
 ---
 apiVersion: v1
 kind: Service

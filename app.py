@@ -8,11 +8,6 @@ import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
 import gc
 from collections import defaultdict
-from flask import Flask, request, jsonify
-from transformers import AutoTokenizer, AutoModelForCausalLM
-import torch
-
-# Authentication and Rate Limiting Setup
 from functools import wraps
 import jwt
 from datetime import datetime, timedelta
@@ -44,18 +39,22 @@ VALID_API_KEYS = {
 # Rate limiting storage
 request_counts = defaultdict(list)
 
+
+
 # Authentication decorator
 def require_api_key(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
         api_key = request.headers.get('X-API-Key')
+        
         if not api_key or api_key not in VALID_API_KEYS.values():
             return jsonify({"error": "Invalid or missing API key"}), 401
+        
         return f(*args, **kwargs)
     return decorated_function
 
 # Rate limiting decorator
-def rate_limit(max_requests=10, window_seconds=60):
+def rate_limit(rate_limit_max=10, window_seconds=60):
     def decorator(f):
         @wraps(f)
         def decorated_function(*args, **kwargs):
@@ -79,11 +78,12 @@ def rate_limit(max_requests=10, window_seconds=60):
             ]
             
             # Check if user has exceeded limit
-            if len(request_counts[user_id]) >= max_requests:
+            current_count = len(request_counts[user_id])
+            if current_count >= rate_limit_max:
                 return jsonify({
                     "error": "Rate limit exceeded",
                     "retry_after": window_seconds,
-                    "limit": max_requests,
+                    "limit": rate_limit_max,
                     "window": window_seconds
                 }), 429
             
@@ -109,6 +109,7 @@ def load_model_with_optimizations():
         setup_model_cache()
         
         logger.info("Attempting to load DialoGPT-medium model with optimizations...")
+        start_time = time.time()
         
         # Use DialoGPT-medium model (open access, no authentication required)
         model_name = "microsoft/DialoGPT-medium"
@@ -138,8 +139,12 @@ def load_model_with_optimizations():
         model = model.to(device)
         model.eval()  # Set to evaluation mode
         
+        # Record model load time
+        load_time = time.time() - start_time
+        
         logger.info(f"DialoGPT-medium model loaded successfully on {device}!")
         logger.info(f"Model cache directory: {MODEL_CACHE_DIR}")
+        logger.info(f"Model load time: {load_time:.2f} seconds")
         
     except Exception as e:
         logger.error(f"Failed to load DialoGPT-medium model: {e}")
@@ -166,7 +171,8 @@ def get_cached_response(cache_key):
 
 def cache_response(cache_key, response):
     """Cache the response"""
-    if len(response_cache) >= CACHE_SIZE:
+    current_cache_size = len(response_cache)
+    if current_cache_size >= CACHE_SIZE:
         # Remove oldest entry (simple LRU)
         oldest_key = next(iter(response_cache))
         del response_cache[oldest_key]
@@ -187,6 +193,8 @@ def optimize_memory():
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
+
+
 # Load model on startup
 load_model_with_optimizations()
 
@@ -199,6 +207,7 @@ def health():
             "cache_misses": cache_stats["misses"],
             "hit_rate": cache_stats["hits"] / (cache_stats["hits"] + cache_stats["misses"]) if (cache_stats["hits"] + cache_stats["misses"]) > 0 else 0
         }
+        
         return jsonify({
             "status": "healthy", 
             "message": "DialoGPT-medium model is loaded and ready",
@@ -210,12 +219,12 @@ def health():
 
 @app.route("/generate", methods=["POST"])
 @require_api_key
-@rate_limit(max_requests=5, window_seconds=60)  # 5 requests per minute per user
+@rate_limit(rate_limit_max=5, window_seconds=60)  # 5 requests per minute per user
 def generate():
     try:
         prompt = request.json.get("prompt", "")
         temperature = request.json.get("temperature", 0.8)
-        max_tokens = request.json.get("max_tokens", 256)
+        max_new_tokens = request.json.get("max_tokens", 256)
         
         if not prompt:
             return jsonify({"error": "No prompt provided"}), 400
@@ -225,7 +234,7 @@ def generate():
             logger.info(f"Generating response for prompt: {prompt[:50]}...")
             
             # Check cache first
-            cache_key = generate_cache_key(prompt, temperature, max_tokens)
+            cache_key = generate_cache_key(prompt, temperature, max_new_tokens)
             cached_response = get_cached_response(cache_key)
             
             if cached_response:
@@ -245,7 +254,7 @@ def generate():
                 outputs = model.generate(
                     inputs,
                     attention_mask=attention_mask,
-                    max_new_tokens=max_tokens,
+                    max_new_tokens=int(max_new_tokens),
                     num_return_sequences=1,
                     temperature=temperature,
                     do_sample=True,
@@ -267,7 +276,8 @@ def generate():
             response = response.replace("<|endoftext|>", "").replace("<|eot_id|>", "").strip()
             
             # If response is empty or too short, try a different approach
-            if not response or len(response) < 5:
+            response_length = len(response)
+            if not response or response_length < 5:
                 logger.info("Attempting fallback generation...")
                 with torch.no_grad():
                     outputs = model.generate(
@@ -288,7 +298,10 @@ def generate():
             cache_response(cache_key, response)
             
             generation_time = time.time() - start_time
+            token_count = len(tokenizer.encode(response))
+            
             logger.info(f"Response generated successfully in {generation_time:.2f}s")
+            logger.info(f"Generated {token_count} tokens")
             
             # Optimize memory after generation
             optimize_memory()
@@ -296,7 +309,8 @@ def generate():
             return jsonify({
                 "response": response,
                 "cached": False,
-                "generation_time": generation_time
+                "generation_time": generation_time,
+                "tokens_generated": token_count
             })
         else:
             return jsonify({"error": "Model not loaded"}), 500
@@ -362,6 +376,8 @@ def rate_limit_status():
         "reset_time": current_time + window_seconds if current_requests > 0 else None
     })
 
+
+
 @app.route("/model/info", methods=["GET"])
 def model_info():
     """Get model information"""
@@ -379,4 +395,5 @@ def model_info():
         return jsonify({"error": "Model not loaded"}), 500
 
 if __name__ == "__main__":
+    logger.info("Starting LLM Flask application with authentication and rate limiting...")
     app.run(host="0.0.0.0", port=8080)
