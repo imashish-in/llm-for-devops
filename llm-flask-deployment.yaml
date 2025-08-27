@@ -25,7 +25,7 @@ spec:
     spec:
       containers:
       - name: llm-flask
-        image: ashishsoldy/llm-flask:latest
+        image: ashishsoldy/llm-flask:metrics-monitoring
         ports:
         - containerPort: 8080
         resources:
@@ -45,6 +45,13 @@ spec:
           value: "/app/model_cache"
         - name: TORCH_HOME
           value: "/app/model_cache"
+        # Authentication and Rate Limiting Configuration
+        - name: SECRET_KEY
+          value: "your-super-secret-key-change-this-in-production"
+        - name: API_KEY_USER1
+          value: "sk-1234567890abcdef"
+        - name: API_KEY_USER2
+          value: "sk-fedcba0987654321"
         livenessProbe:
           httpGet:
             path: /health

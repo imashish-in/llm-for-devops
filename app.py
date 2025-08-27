@@ -17,6 +17,11 @@ from functools import wraps
 import jwt
 from datetime import datetime, timedelta
 
+# Metrics and Monitoring Setup
+from prometheus_client import Counter, Histogram, Gauge, generate_latest, CONTENT_TYPE_LATEST
+import psutil
+import threading
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -44,13 +49,51 @@ VALID_API_KEYS = {
 # Rate limiting storage
 request_counts = defaultdict(list)
 
+# Prometheus Metrics Setup
+# Request metrics
+REQUEST_COUNT = Counter('llm_requests_total', 'Total number of requests', ['method', 'endpoint', 'status'])
+REQUEST_DURATION = Histogram('llm_request_duration_seconds', 'Request duration in seconds', ['method', 'endpoint'])
+
+# Model metrics
+MODEL_LOAD_TIME = Histogram('llm_model_load_duration_seconds', 'Model loading duration in seconds')
+GENERATION_DURATION = Histogram('llm_generation_duration_seconds', 'Text generation duration in seconds')
+GENERATION_TOKENS = Histogram('llm_generation_tokens', 'Number of tokens generated')
+
+# Cache metrics
+CACHE_HITS = Counter('llm_cache_hits_total', 'Total cache hits')
+CACHE_MISSES = Counter('llm_cache_misses_total', 'Total cache misses')
+CACHE_SIZE_GAUGE = Gauge('llm_cache_size', 'Current cache size')
+
+# System metrics
+MEMORY_USAGE = Gauge('llm_memory_usage_bytes', 'Memory usage in bytes')
+CPU_USAGE = Gauge('llm_cpu_usage_percent', 'CPU usage percentage')
+MODEL_MEMORY = Gauge('llm_model_memory_bytes', 'Model memory usage in bytes')
+
+# Authentication metrics
+AUTH_FAILURES = Counter('llm_auth_failures_total', 'Total authentication failures')
+RATE_LIMIT_EXCEEDED = Counter('llm_rate_limit_exceeded_total', 'Total rate limit violations')
+
+# Application metrics
+ACTIVE_REQUESTS = Gauge('llm_active_requests', 'Number of active requests')
+ERROR_COUNT = Counter('llm_errors_total', 'Total number of errors', ['type'])
+
+# Metrics collection thread
+metrics_thread = None
+stop_metrics = False
+
 # Authentication decorator
 def require_api_key(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
+        start_time = time.time()
         api_key = request.headers.get('X-API-Key')
+        
         if not api_key or api_key not in VALID_API_KEYS.values():
+            AUTH_FAILURES.inc()
+            REQUEST_COUNT.labels(method=request.method, endpoint=request.endpoint, status='401').inc()
+            REQUEST_DURATION.labels(method=request.method, endpoint=request.endpoint).observe(time.time() - start_time)
             return jsonify({"error": "Invalid or missing API key"}), 401
+        
         return f(*args, **kwargs)
     return decorated_function
 
@@ -59,6 +102,8 @@ def rate_limit(max_requests=10, window_seconds=60):
     def decorator(f):
         @wraps(f)
         def decorated_function(*args, **kwargs):
+            start_time = time.time()
+            
             # Get user identifier from API key
             api_key = request.headers.get('X-API-Key')
             user_id = None
@@ -68,6 +113,9 @@ def rate_limit(max_requests=10, window_seconds=60):
                     break
             
             if not user_id:
+                AUTH_FAILURES.inc()
+                REQUEST_COUNT.labels(method=request.method, endpoint=request.endpoint, status='401').inc()
+                REQUEST_DURATION.labels(method=request.method, endpoint=request.endpoint).observe(time.time() - start_time)
                 return jsonify({"error": "Invalid API key"}), 401
             
             current_time = time.time()
@@ -80,6 +128,9 @@ def rate_limit(max_requests=10, window_seconds=60):
             
             # Check if user has exceeded limit
             if len(request_counts[user_id]) >= max_requests:
+                RATE_LIMIT_EXCEEDED.inc()
+                REQUEST_COUNT.labels(method=request.method, endpoint=request.endpoint, status='429').inc()
+                REQUEST_DURATION.labels(method=request.method, endpoint=request.endpoint).observe(time.time() - start_time)
                 return jsonify({
                     "error": "Rate limit exceeded",
                     "retry_after": window_seconds,
@@ -93,6 +144,71 @@ def rate_limit(max_requests=10, window_seconds=60):
             return f(*args, **kwargs)
         return decorated_function
     return decorator
+
+def collect_system_metrics():
+    """Collect system metrics periodically"""
+    global stop_metrics
+    while not stop_metrics:
+        try:
+            # Memory usage
+            memory = psutil.virtual_memory()
+            MEMORY_USAGE.set(memory.used)
+            
+            # CPU usage
+            cpu_percent = psutil.cpu_percent(interval=1)
+            CPU_USAGE.set(cpu_percent)
+            
+            # Model memory if available
+            if model is not None:
+                model_memory = sum(p.numel() * p.element_size() for p in model.parameters())
+                MODEL_MEMORY.set(model_memory)
+            
+            # Cache size
+            CACHE_SIZE_GAUGE.set(len(response_cache))
+            
+            time.sleep(30)  # Collect metrics every 30 seconds
+        except Exception as e:
+            logger.error(f"Error collecting system metrics: {e}")
+            time.sleep(30)
+
+def start_metrics_collection():
+    """Start the metrics collection thread"""
+    global metrics_thread, stop_metrics
+    stop_metrics = False
+    metrics_thread = threading.Thread(target=collect_system_metrics, daemon=True)
+    metrics_thread.start()
+    logger.info("Metrics collection started")
+
+def stop_metrics_collection():
+    """Stop the metrics collection thread"""
+    global stop_metrics
+    stop_metrics = True
+    if metrics_thread:
+        metrics_thread.join(timeout=5)
+
+# Request tracking decorator
+def track_request(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        start_time = time.time()
+        ACTIVE_REQUESTS.inc()
+        
+        try:
+            result = f(*args, **kwargs)
+            # Track successful requests
+            REQUEST_COUNT.labels(method=request.method, endpoint=request.endpoint, status='200').inc()
+            REQUEST_DURATION.labels(method=request.method, endpoint=request.endpoint).observe(time.time() - start_time)
+            return result
+        except Exception as e:
+            # Track errors
+            ERROR_COUNT.labels(type='request_error').inc()
+            REQUEST_COUNT.labels(method=request.method, endpoint=request.endpoint, status='500').inc()
+            REQUEST_DURATION.labels(method=request.method, endpoint=request.endpoint).observe(time.time() - start_time)
+            raise
+        finally:
+            ACTIVE_REQUESTS.dec()
+    
+    return decorated_function
 
 def setup_model_cache():
     """Setup model cache directory"""
@@ -109,6 +225,7 @@ def load_model_with_optimizations():
         setup_model_cache()
         
         logger.info("Attempting to load DialoGPT-medium model with optimizations...")
+        start_time = time.time()
         
         # Use DialoGPT-medium model (open access, no authentication required)
         model_name = "microsoft/DialoGPT-medium"
@@ -138,11 +255,17 @@ def load_model_with_optimizations():
         model = model.to(device)
         model.eval()  # Set to evaluation mode
         
+        # Record model load time
+        load_time = time.time() - start_time
+        MODEL_LOAD_TIME.observe(load_time)
+        
         logger.info(f"DialoGPT-medium model loaded successfully on {device}!")
         logger.info(f"Model cache directory: {MODEL_CACHE_DIR}")
+        logger.info(f"Model load time: {load_time:.2f} seconds")
         
     except Exception as e:
         logger.error(f"Failed to load DialoGPT-medium model: {e}")
+        ERROR_COUNT.labels(type='model_load').inc()
         raise e
 
 def generate_cache_key(prompt, temperature=0.8, max_tokens=256):
@@ -156,12 +279,14 @@ def get_cached_response(cache_key):
         cached_data = response_cache[cache_key]
         if time.time() - cached_data['timestamp'] < CACHE_TTL:
             cache_stats["hits"] += 1
+            CACHE_HITS.inc()
             return cached_data['response']
         else:
             # Remove expired cache entry
             del response_cache[cache_key]
     
     cache_stats["misses"] += 1
+    CACHE_MISSES.inc()
     return None
 
 def cache_response(cache_key, response):
@@ -191,6 +316,7 @@ def optimize_memory():
 load_model_with_optimizations()
 
 @app.route("/health", methods=["GET"])
+@track_request
 def health():
     if model is not None:
         cache_info = {
@@ -209,6 +335,7 @@ def health():
         return jsonify({"status": "unhealthy", "error": "No model loaded"}), 500
 
 @app.route("/generate", methods=["POST"])
+@track_request
 @require_api_key
 @rate_limit(max_requests=5, window_seconds=60)  # 5 requests per minute per user
 def generate():
@@ -288,7 +415,14 @@ def generate():
             cache_response(cache_key, response)
             
             generation_time = time.time() - start_time
+            
+            # Record generation metrics
+            GENERATION_DURATION.observe(generation_time)
+            token_count = len(tokenizer.encode(response))
+            GENERATION_TOKENS.observe(token_count)
+            
             logger.info(f"Response generated successfully in {generation_time:.2f}s")
+            logger.info(f"Generated {token_count} tokens")
             
             # Optimize memory after generation
             optimize_memory()
@@ -296,7 +430,8 @@ def generate():
             return jsonify({
                 "response": response,
                 "cached": False,
-                "generation_time": generation_time
+                "generation_time": generation_time,
+                "tokens_generated": token_count
             })
         else:
             return jsonify({"error": "Model not loaded"}), 500
@@ -378,5 +513,74 @@ def model_info():
     else:
         return jsonify({"error": "Model not loaded"}), 500
 
+@app.route("/metrics")
+def metrics():
+    """Prometheus metrics endpoint"""
+    return generate_latest(), 200, {'Content-Type': CONTENT_TYPE_LATEST}
+
+@app.route("/dashboard")
+def dashboard():
+    """Application dashboard with key metrics"""
+    try:
+        # System metrics
+        memory = psutil.virtual_memory()
+        cpu_percent = psutil.cpu_percent()
+        
+        # Model metrics
+        model_info = {}
+        if model is not None:
+            device = next(model.parameters()).device
+            model_size = sum(p.numel() for p in model.parameters())
+            model_memory = sum(p.numel() * p.element_size() for p in model.parameters())
+            model_info = {
+                "device": str(device),
+                "parameters": model_size,
+                "memory_mb": round(model_memory / 1024 / 1024, 2),
+                "dtype": str(next(model.parameters()).dtype)
+            }
+        
+        # Cache metrics
+        cache_info = {
+            "size": len(response_cache),
+            "hits": cache_stats["hits"],
+            "misses": cache_stats["misses"],
+            "hit_rate": round(cache_stats["hits"] / (cache_stats["hits"] + cache_stats["misses"]) * 100, 2) if (cache_stats["hits"] + cache_stats["misses"]) > 0 else 0,
+            "ttl_seconds": CACHE_TTL,
+            "max_size": CACHE_SIZE
+        }
+        
+        # Request metrics (approximate from Prometheus metrics)
+        request_info = {
+            "active_requests": ACTIVE_REQUESTS._value.get(),
+            "total_requests": 0,  # Will be calculated from actual metrics
+            "auth_failures": AUTH_FAILURES._value.get(),
+            "rate_limit_violations": RATE_LIMIT_EXCEEDED._value.get()
+        }
+        
+        # System info
+        system_info = {
+            "memory_used_mb": round(memory.used / 1024 / 1024, 2),
+            "memory_total_mb": round(memory.total / 1024 / 1024, 2),
+            "memory_percent": round(memory.percent, 2),
+            "cpu_percent": round(cpu_percent, 2),
+            "uptime_seconds": time.time() - app.start_time if hasattr(app, 'start_time') else 0
+        }
+        
+        return jsonify({
+            "status": "healthy" if model is not None else "unhealthy",
+            "timestamp": datetime.now().isoformat(),
+            "model": model_info,
+            "cache": cache_info,
+            "requests": request_info,
+            "system": system_info
+        })
+        
+    except Exception as e:
+        logger.error(f"Error generating dashboard: {e}")
+        return jsonify({"error": str(e)}), 500
+
 if __name__ == "__main__":
+    app.start_time = time.time()
+    logger.info("Starting LLM Flask application with metrics and monitoring...")
+    start_metrics_collection()
     app.run(host="0.0.0.0", port=8080)

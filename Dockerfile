@@ -14,7 +14,7 @@ RUN mkdir -p /app/model_cache
 
 # Install Python dependencies
 RUN pip install --upgrade pip
-RUN pip install flask transformers torch accelerate PyJWT
+RUN pip install flask transformers torch accelerate PyJWT prometheus-client psutil
 
 # Copy app source code
 COPY app.py .

@@ -10,6 +10,7 @@ A Flask-based web application for LLM (Large Language Model) inference using Mic
 - **Model Optimization**: Half-precision, memory optimization, and performance tuning
 - **Authentication**: API key-based authentication for secure access
 - **Rate Limiting**: Configurable rate limiting per user (5 requests/minute)
+- **Metrics & Monitoring**: Prometheus metrics, real-time dashboard, and performance tracking
 - **Docker Containerization**: Easy deployment and scaling
 - **Kubernetes Ready**: Complete deployment configuration with persistent storage
 - **Health Monitoring**: Built-in health checks and readiness probes
@@ -159,9 +160,20 @@ kubectl port-forward service/llm-flask-service 8080:8080
 
 # Test the deployed application
 curl http://localhost:8080/health
+
+# Test with authentication
 curl -X POST http://localhost:8080/generate \
   -H "Content-Type: application/json" \
+  -H "X-API-Key: sk-1234567890abcdef" \
   -d '{"prompt": "What is artificial intelligence?"}'
+
+# Check rate limit status
+curl -H "X-API-Key: sk-1234567890abcdef" \
+  http://localhost:8080/rate-limit/status
+
+# Test metrics and monitoring
+curl http://localhost:8080/metrics
+curl http://localhost:8080/dashboard
 ```
 
 ## 📡 API Endpoints
@@ -204,7 +216,8 @@ X-API-Key: sk-1234567890abcdef
 {
   "response": "Generated text from DialoGPT-medium model",
   "cached": false,
-  "generation_time": 2.34
+  "generation_time": 2.34,
+  "tokens_generated": 15
 }
 ```
 
@@ -239,6 +252,16 @@ GET /model/info
 
 **Authentication Required**: ❌ No (Public endpoints)
 
+### Metrics and Monitoring
+```http
+GET /metrics
+GET /dashboard
+```
+
+**Response**: Prometheus metrics and comprehensive application dashboard
+
+**Authentication Required**: ❌ No (Public endpoints)
+
 ### Example LLM Interaction
 ```bash
 # Test the LLM endpoint with a sample prompt
@@ -255,7 +278,8 @@ curl -X POST http://localhost:8080/generate \
 {
   "response": "Machine learning is the process of learning a new thing. You will learn what you have learned.",
   "cached": false,
-  "generation_time": 1.23
+  "generation_time": 1.23,
+  "tokens_generated": 12
 }
 ```
 
@@ -392,12 +416,160 @@ kubectl get pods -l app=llm-flask
 kubectl logs -f deployment/llm-flask
 ```
 
+## 📊 Metrics and Monitoring
+
+### Prometheus Metrics
+
+The application exposes comprehensive Prometheus metrics for monitoring and alerting:
+
+#### **Request Metrics**
+- `llm_requests_total`: Total requests by endpoint, method, and status
+- `llm_request_duration_seconds`: Request duration histograms
+- `llm_active_requests`: Number of currently active requests
+
+#### **Model Metrics**
+- `llm_model_load_duration_seconds`: Model loading time
+- `llm_generation_duration_seconds`: Text generation time
+- `llm_generation_tokens`: Number of tokens generated
+
+#### **Cache Metrics**
+- `llm_cache_hits_total`: Total cache hits
+- `llm_cache_misses_total`: Total cache misses
+- `llm_cache_size`: Current cache size
+
+#### **System Metrics**
+- `llm_memory_usage_bytes`: Memory usage in bytes
+- `llm_cpu_usage_percent`: CPU usage percentage
+- `llm_model_memory_bytes`: Model memory usage
+
+#### **Security Metrics**
+- `llm_auth_failures_total`: Authentication failures
+- `llm_rate_limit_exceeded_total`: Rate limit violations
+- `llm_errors_total`: Error counts by type
+
+### Dashboard
+
+The `/dashboard` endpoint provides a comprehensive JSON dashboard with:
+
+```json
+{
+  "status": "healthy",
+  "timestamp": "2025-08-27T04:47:03.780352",
+  "model": {
+    "device": "cpu",
+    "dtype": "torch.float16",
+    "memory_mb": 676.77,
+    "parameters": 354823168
+  },
+  "cache": {
+    "size": 1,
+    "hits": 0,
+    "misses": 1,
+    "hit_rate": 0.0,
+    "ttl_seconds": 3600,
+    "max_size": 1000
+  },
+  "requests": {
+    "active_requests": 0.0,
+    "auth_failures": 1.0,
+    "rate_limit_violations": 0.0
+  },
+  "system": {
+    "memory_used_mb": 6545.38,
+    "memory_total_mb": 7837.19,
+    "memory_percent": 86.8,
+    "cpu_percent": 0.0,
+    "uptime_seconds": 204.35
+  }
+}
+```
+
+### Monitoring Setup
+
+#### **Prometheus Configuration**
+```yaml
+scrape_configs:
+  - job_name: 'llm-flask'
+    static_configs:
+      - targets: ['llm-flask-service:8080']
+    metrics_path: '/metrics'
+    scrape_interval: 30s
+```
+
+#### **Grafana Dashboard**
+Import the following metrics for a comprehensive dashboard:
+- Request rate and duration
+- Cache hit rate and size
+- System resource usage
+- Authentication and rate limiting metrics
+- Model performance metrics
+
+#### **Alerting Rules**
+```yaml
+groups:
+  - name: llm-flask
+    rules:
+      - alert: HighErrorRate
+        expr: rate(llm_errors_total[5m]) > 0.1
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High error rate detected"
+      
+      - alert: HighMemoryUsage
+        expr: llm_memory_usage_bytes / 1024 / 1024 / 1024 > 6
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High memory usage detected"
+      
+      - alert: HighAuthFailures
+        expr: rate(llm_auth_failures_total[5m]) > 0.05
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High authentication failure rate"
+```
+
+### Usage Examples
+
+#### **Check Metrics**
+```bash
+# Get Prometheus metrics
+curl http://localhost:8080/metrics
+
+# Get dashboard
+curl http://localhost:8080/dashboard
+
+# Monitor specific metrics
+curl http://localhost:8080/metrics | grep "llm_requests_total"
+```
+
+#### **Monitor Cache Performance**
+```bash
+# Check cache hit rate
+curl http://localhost:8080/metrics | grep "llm_cache_hits_total"
+curl http://localhost:8080/metrics | grep "llm_cache_misses_total"
+```
+
+#### **Monitor System Resources**
+```bash
+# Check memory usage
+curl http://localhost:8080/metrics | grep "llm_memory_usage_bytes"
+
+# Check CPU usage
+curl http://localhost:8080/metrics | grep "llm_cpu_usage_percent"
+```
+
 ## 🔮 Future Enhancements
 
 ### Planned Features
 - [ ] Model caching and optimization ✅ (Implemented)
 - [ ] Authentication and rate limiting ✅ (Implemented)
-- [ ] Metrics and monitoring
+- [ ] Metrics and monitoring ✅ (Implemented)
 - [ ] Horizontal pod autoscaling
 - [ ] Ingress configuration for external access
 - [ ] Support for additional models
@@ -417,10 +589,12 @@ The application can be easily modified to use other models:
 - **Real LLM Responses**: Uses actual DialoGPT-medium model for text generation
 - **Advanced Caching**: Response caching with TTL and LRU eviction
 - **Model Optimization**: Half-precision and memory optimization
+- **Authentication**: API key-based authentication for secure access
+- **Rate Limiting**: In-memory rate limiting (5 requests/minute per user)
+- **Metrics & Monitoring**: Prometheus metrics, real-time dashboard, and performance tracking
 - **Docker Compatible**: Fully containerized and Kubernetes-ready
 - **Production Ready**: Stable deployment with health checks
 - **Memory Efficient**: Medium-sized model suitable for containerized environments
-- **Open Access**: No authentication required for model access
 - **Multi-Platform**: Supports all major operating systems and architectures
 
 ### Performance Considerations
@@ -431,11 +605,13 @@ The application can be easily modified to use other models:
 - **Scaling**: Horizontal scaling supported via Kubernetes
 
 ### Security Considerations
-- Add authentication for production use
-- Implement rate limiting
-- Use secrets for sensitive configuration
-- Enable TLS/SSL for external access
-- Regular security updates
+- ✅ **Authentication**: API key-based authentication implemented
+- ✅ **Rate Limiting**: In-memory rate limiting implemented
+- ✅ **Secrets Management**: Kubernetes secrets for sensitive configuration
+- **TLS/SSL**: Enable TLS/SSL for external access in production
+- **Regular Updates**: Keep dependencies and base images updated
+- **Key Rotation**: Rotate API keys periodically
+- **Access Logging**: Monitor API usage and authentication attempts
 
 ## 🤝 Contributing
 
